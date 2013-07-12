@@ -36,6 +36,7 @@ my $opt_gen;
 my $opt_zone;
 my $opt_help;
 
+#Read in options (long or short) from invocation
 GetOptions( 
 	'file=s' 	=> 	\$opt_file,
 	'zone=s' 	=> 	\$opt_zone,
@@ -43,7 +44,7 @@ GetOptions(
 	'help'		=>	\$opt_help,
 );
 
-
+#help
 if ( $opt_help) {
 	print "This script works off the DynECT API to generate and process CSV files\nto update A records within an account\n";
 	print "\nOPTIONS:\n";
@@ -92,6 +93,7 @@ my $apipw = $configopt{'pw'} or do {
 	exit;
 };
 
+#The github version comes with example values that should be changed
 if ( ($apicn eq 'CUSOTMER') || ($apiun eq 'USER_NAME') || ($apipw eq 'PASSWORD')) {
 	print "Please change the default values in config.cfg for API login credentials\n";
 	exit;
@@ -113,9 +115,11 @@ my $api_lwp = LWP::UserAgent->new;
 my $api_result = $api_lwp->request( $api_request );
 
 my $api_decode = decode_json ( $api_result->content ) ;
+#Grab API key
 my $api_key = $api_decode->{'data'}->{'token'};
 
 if ( !$opt_gen ) {
+	#Create CSV reader
 	my $csv_read = Text::CSV_XS->new  ( { binary => 1 } )
 		or die "Cannot use CSV: ".Text::CSV_XS->error_diag ();
 	open (my $fhan, '<', $opt_file) 
@@ -123,12 +127,14 @@ if ( !$opt_gen ) {
 	
 	#Hash to store all nodes that need updating to avoid processing the same node more than once
 	my %nodes;
+	#Read in all changes
 	while ( my $csvrow = $csv_read->getline( $fhan )) {
 		next unless $csvrow->[2];
 		push ( @{ $nodes{ $csvrow->[0] }} , [ $csvrow->[1], $csvrow->[2]]);
 	}
 	close $fhan;
 
+	#Call REST/AllRecord on the zone
 	my $allrec_uri = "https://api2.dynect.net/REST/AllRecord/$opt_zone";
 	$api_request = HTTP::Request->new('GET',$allrec_uri);
 	$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
@@ -136,16 +142,21 @@ if ( !$opt_gen ) {
 	$api_result = $api_lwp->request($api_request);
 	$api_decode = decode_json( $api_result->content);
 	$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
+	#Grab the zone record URI information
 	my $keep_decode = $api_decode;
 
 
 	foreach my $uri ( @{ $keep_decode->{'data'} }) {
+		#Skip any non-a records
 		next unless $uri =~ /\/REST\/ARecord\//;
+		#Process all possible matching changes
 		foreach my $node ( keys %nodes ) {
+			#Check to see if zone node matches
 			my $regex = '\/REST\/ARecord\/' . $opt_zone . '\/([^/]+)/';
 			$uri =~ /$regex/;
 			next unless ( $1 eq $node);
 
+			#Check rdata behind that URI
 			my $arec_uri = "https://api2.dynect.net$uri";
 			$api_request = HTTP::Request->new('GET',$arec_uri);
 			$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
@@ -153,9 +164,11 @@ if ( !$opt_gen ) {
 			$api_result = $api_lwp->request($api_request);
 			$api_decode = decode_json( $api_result->content);
 			$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
-			
+
+			#Check all updates at that node for matches			
 			foreach my $set ( @{ $nodes{ $node } } ) {
 				next unless $api_decode->{'data'}{'rdata'}{'address'} eq $set->[0];
+					#If so, update node
 					print "Updating $node from $set->[0] => $set->[1]\n";
 					$api_request = HTTP::Request->new('PUT',$arec_uri);
 					$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
@@ -168,6 +181,7 @@ if ( !$opt_gen ) {
 		}
 	}
 
+	#Done making changes, publish zone
 	print "Publishing updates to zone $opt_zone\n";
 	my $zone_uri = "https://api2.dynect.net/REST/Zone/$opt_zone";
 	$api_request = HTTP::Request->new('PUT',$zone_uri);
@@ -183,6 +197,7 @@ else {
 	#Generating file for CSV
 	print "Generating CSV file $opt_file for zone $opt_zone\n";
 
+	#Get all records on zone
 	my $allrec_uri = "https://api2.dynect.net/REST/AllRecord/$opt_zone";
 	$api_request = HTTP::Request->new('GET',$allrec_uri);
 	$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
@@ -191,6 +206,7 @@ else {
 	$api_decode = decode_json( $api_result->content);
 	$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
 
+	#Initialize CSV writer
 	my $csv_write = Text::CSV_XS->new  ( { binary => 1 } ) 
 		or die "Cannot use CSV: ".Text::CSV_XS->error_diag ();
 	open (my $fhan,'>', $opt_file)
@@ -218,7 +234,7 @@ else {
 }
 	
 
-#api logout
+#api logout for either logic branch
 $api_request = HTTP::Request->new('DELETE',$session_uri);
 $api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
 $api_result = $api_lwp->request( $api_request );
