@@ -1,5 +1,27 @@
 #!/usr/bin/env perl
 
+#This script works off the DynECT API to do one of two primary actions:
+#1. Generate a two column CSV file where column 1 is a series of nodes withing a
+#zone and column 2 is the A Record located at that node
+#2. Update a zone by reading a 3 column zone extended from 1. whereas column 3 is
+#the new A record to replace the record listed to the left
+#
+#OPTIONS:
+#-h/--help	Displays this help message
+#-f/--file	File to be read for updated record information
+#-z/--zone	Name of zone to be updated EG. example.com
+#-g/--gen	Set this option to generate a CSV file
+#With this option set -f will be used as the file to be written
+#With this option set -z will be used as the zone to be read
+#
+#EXAMPLE USGAGE:
+#perl record_update.pl -f ips.csv -z example.com
+#-Read udpates from ips.csv and apply them to example.com
+#
+#perl record_updates.pl -f gen.csv -z example.com --gen
+#-Read example.com and generate a CSV file from its current A records
+
+
 use warnings;
 use strict;
 use Config::Simple;
@@ -23,8 +45,19 @@ GetOptions(
 
 
 if ( $opt_help) {
-#TODO: HELP TEXT HERE!!!!
-	print "SAMPLE HELP TEXT\n";
+	print "This script works off the DynECT API to generate and process CSV files\nto update A records within an account\n";
+	print "\nOPTIONS:\n";
+	print "-h/--help\tDisplays this help message\n";
+	print "-f/--file\tFile to be read for updated record information\n";
+	print "-z/--zone\tName of zone to be updated EG. example.com\n";
+	print "-g/--gen\tSet this option to generate a CSV file\n";
+	print "\t\tWith this option set -f will be used as the file to be written\n";
+	print "\t\tWith this option set -z will be used as the zone to be read\n";
+	print "\nEXAMPLE USGAGE:\n";
+	print "perl record_update.pl -f ips.csv -z example.com\n";
+	print "-Read udpates from ips.csv and apply them to example.com\n\n";
+	print "perl record_updates.pl -f gen.csv -z example.com --gen\n";
+	print "-Read example.com and generate a CSV file from its current A records\n\n";
 	exit;
 }
 elsif (!$opt_zone) {
