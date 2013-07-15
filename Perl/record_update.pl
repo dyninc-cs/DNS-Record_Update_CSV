@@ -5,7 +5,8 @@
 #zone and column 2 is the A Record located at that node
 #2. Update a zone by reading a 3 column zone extended from 1. whereas column 3 is
 #the new A record to replace the record listed to the left
-#
+#-If column 1 is 'ADD' the script will add the record at that node
+#-If column 2 is 'DEL' the script will delete that a record
 #OPTIONS:
 #-h/--help	Displays this help message
 #-f/--file	File to be read for updated record information
@@ -29,6 +30,7 @@ use Getopt::Long;
 use LWP::UserAgent;
 use JSON;
 use Text::CSV_XS;
+use Data::Dumper;
 
 #Get Options
 my $opt_file;
@@ -61,7 +63,7 @@ if ( $opt_help) {
 	print "-Read example.com and generate a CSV file from its current A records\n\n";
 	exit;
 }
-elsif (!$opt_zone) {
+if (!$opt_zone) {
 	print "-z or --zone option required\n";
 	exit;
 }
@@ -168,8 +170,18 @@ if ( !$opt_gen ) {
 			#Check all updates at that node for matches			
 			foreach my $set ( @{ $nodes{ $node } } ) {
 				next unless $api_decode->{'data'}{'rdata'}{'address'} eq $set->[0];
+				if ( uc($set->[1]) eq 'DEL') {
+					print "Delete - $node - $set->[0]\n";
+					$api_request = HTTP::Request->new('DELETE',$arec_uri);
+					$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
+					$api_request->content();
+					$api_result = $api_lwp->request($api_request);
+					$api_decode = decode_json( $api_result->content);
+					$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
+				}
+				else {
 					#If so, update node
-					print "Updating $node from $set->[0] => $set->[1]\n";
+					print "Update - $node - $set->[0] => $set->[1]\n";
 					$api_request = HTTP::Request->new('PUT',$arec_uri);
 					$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
 					%api_param = ( rdata => { 'address' => $set->[1] });
@@ -177,7 +189,25 @@ if ( !$opt_gen ) {
 					$api_result = $api_lwp->request($api_request);
 					$api_decode = decode_json( $api_result->content);
 					$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
+				}
 			}
+		}
+	}
+	
+	#Check for any added records
+	foreach my $node ( keys %nodes ) {
+		foreach my $set ( @{ $nodes{ $node } } ) {
+			next unless ( uc($set->[0]) eq 'ADD');
+			#Add record
+			print "Add   - $node - $set->[1]\n";
+			my $arec_uri = "https://api2.dynect.net/REST/ARecord/$opt_zone/$node/";
+			$api_request = HTTP::Request->new('POST',$arec_uri);
+			$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
+			%api_param = ( rdata => { 'address' => $set->[1] });
+			$api_request->content( to_json( \%api_param ) );
+			$api_result = $api_lwp->request($api_request);
+			$api_decode = decode_json( $api_result->content);
+			$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
 		}
 	}
 

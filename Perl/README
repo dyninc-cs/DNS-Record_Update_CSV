@@ -37,6 +37,8 @@ This script works off the DynECT API to do one of two primary actions:
 zone and column 2 is the A Record located at that node
 2. Update a zone by reading a 3 column zone extended from 1. whereas column 3 is
 the new A record to replace the record listed to the left
+-If column 1 is 'ADD' the script will add the record defined in column 2 at that node
+-If column 2 is 'DEL' the script will delete the record defiance in column 1
 
 OPTIONS:
 -h/--help   Displays this help message
