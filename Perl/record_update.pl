@@ -32,6 +32,12 @@ use JSON;
 use Text::CSV_XS;
 use Data::Dumper;
 
+#Import DynECT handler
+use FindBin;
+use lib "$FindBin::Bin/DynectDNS";  # use the parent directory
+use DynECTDNS;
+
+
 #Get Options
 my $opt_file;
 my $opt_gen;
@@ -101,24 +107,10 @@ if ( ($apicn eq 'CUSOTMER') || ($apiun eq 'USER_NAME') || ($apipw eq 'PASSWORD')
 	exit;
 }
 
-#API login
-my $session_uri = 'https://api2.dynect.net/REST/Session';
-my %api_param = ( 
-	'customer_name' => $apicn,
-	'user_name' => $apiun,
-	'password' => $apipw,
-	);
 
-my $api_request = HTTP::Request->new('POST',$session_uri);
-$api_request->header ( 'Content-Type' => 'application/json' );
-$api_request->content( to_json( \%api_param ) );
-
-my $api_lwp = LWP::UserAgent->new;
-my $api_result = $api_lwp->request( $api_request );
-
-my $api_decode = decode_json ( $api_result->content ) ;
-#Grab API key
-my $api_key = $api_decode->{'data'}->{'token'};
+my $dynect = DynECTDNS->new();
+$dynect->login( $apicn, $apiun, $apipw)
+	or die $dynect->message;
 
 if ( !$opt_gen ) {
 	#Create CSV reader
@@ -137,18 +129,13 @@ if ( !$opt_gen ) {
 	close $fhan;
 
 	#Call REST/AllRecord on the zone
-	my $allrec_uri = "https://api2.dynect.net/REST/AllRecord/$opt_zone";
-	$api_request = HTTP::Request->new('GET',$allrec_uri);
-	$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
-	$api_request->content();
-	$api_result = $api_lwp->request($api_request);
-	$api_decode = decode_json( $api_result->content);
-	$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
-	#Grab the zone record URI information
-	my $keep_decode = $api_decode;
+	$dynect->request( "/REST/AllRecord/$opt_zone", 'GET')
+		or die $dynect->message;
+
+	my $keep_result = $dynect->result;
 
 
-	foreach my $uri ( @{ $keep_decode->{'data'} }) {
+	foreach my $uri ( @{ $keep_result->{'data'} }) {
 		#Skip any non-a records
 		next unless $uri =~ /\/REST\/ARecord\//;
 		#Process all possible matching changes
@@ -159,36 +146,21 @@ if ( !$opt_gen ) {
 			next unless ( $1 eq $node);
 
 			#Check rdata behind that URI
-			my $arec_uri = "https://api2.dynect.net$uri";
-			$api_request = HTTP::Request->new('GET',$arec_uri);
-			$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
-			$api_request->content();
-			$api_result = $api_lwp->request($api_request);
-			$api_decode = decode_json( $api_result->content);
-			$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
+			$dynect->request( $uri, 'GET') or die $dynect->message;
+			my $rdata = $dynect->result; 
 
 			#Check all updates at that node for matches			
 			foreach my $set ( @{ $nodes{ $node } } ) {
-				next unless $api_decode->{'data'}{'rdata'}{'address'} eq $set->[0];
+				next unless $rdata->{'data'}{'rdata'}{'address'} eq $set->[0];
 				if ( uc($set->[1]) eq 'DEL') {
 					print "Delete - $node - $set->[0]\n";
-					$api_request = HTTP::Request->new('DELETE',$arec_uri);
-					$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
-					$api_request->content();
-					$api_result = $api_lwp->request($api_request);
-					$api_decode = decode_json( $api_result->content);
-					$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
+					$dynect->request( $uri, 'DELETE');  
 				}
 				else {
 					#If so, update node
 					print "Update - $node - $set->[0] => $set->[1]\n";
-					$api_request = HTTP::Request->new('PUT',$arec_uri);
-					$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
-					%api_param = ( rdata => { 'address' => $set->[1] });
-					$api_request->content( to_json( \%api_param ) );
-					$api_result = $api_lwp->request($api_request);
-					$api_decode = decode_json( $api_result->content);
-					$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
+					my %api_param = ( rdata => { 'address' => $set->[1] });
+					$dynect->request( $uri, 'put', \%api_param) or die $dynect->message; 
 				}
 			}
 		}
@@ -200,27 +172,14 @@ if ( !$opt_gen ) {
 			next unless ( uc($set->[0]) eq 'ADD');
 			#Add record
 			print "Add   - $node - $set->[1]\n";
-			my $arec_uri = "https://api2.dynect.net/REST/ARecord/$opt_zone/$node/";
-			$api_request = HTTP::Request->new('POST',$arec_uri);
-			$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
-			%api_param = ( rdata => { 'address' => $set->[1] });
-			$api_request->content( to_json( \%api_param ) );
-			$api_result = $api_lwp->request($api_request);
-			$api_decode = decode_json( $api_result->content);
-			$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
+			my %api_param = ( rdata => { 'address' => $set->[1] });
+			$dynect->request( "/REST/ARecord/$opt_zone/$node/", 'POST', \%api_param) or die $dynect->message;
 		}
 	}
 
 	#Done making changes, publish zone
-	print "Publishing updates to zone $opt_zone\n";
-	my $zone_uri = "https://api2.dynect.net/REST/Zone/$opt_zone";
-	$api_request = HTTP::Request->new('PUT',$zone_uri);
-	$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
-	%api_param = ( publish => 'True' );
-	$api_request->content( to_json( \%api_param ));
-	$api_result = $api_lwp->request($api_request);
-	$api_decode = decode_json( $api_result->content);
-	$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
+	my %api_param = ( publish => 'True' );
+	$dynect->request( "/REST/Zone/$opt_zone", 'PUT', \%api_param) or die $dynect->message;
 }
 
 else {
@@ -228,13 +187,8 @@ else {
 	print "Generating CSV file $opt_file for zone $opt_zone\n";
 
 	#Get all records on zone
-	my $allrec_uri = "https://api2.dynect.net/REST/AllRecord/$opt_zone";
-	$api_request = HTTP::Request->new('GET',$allrec_uri);
-	$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
-	$api_request->content();
-	$api_result = $api_lwp->request($api_request);
-	$api_decode = decode_json( $api_result->content);
-	$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
+	$dynect->request( "/REST/AllRecord/$opt_zone", 'GET');
+	my $allrec = $dynect->result;
 
 	#Initialize CSV writer
 	my $csv_write = Text::CSV_XS->new  ( { binary => 1 } ) 
@@ -243,17 +197,12 @@ else {
 		or die "Unable to oepn $opt_file for writing\n";
 
 	#iterate over all recrod URI looking for type ARecord	
-	foreach my $rec_uri ( @{$api_decode->{'data'}} ) {
+	foreach my $rec_uri ( @{$allrec->{'data'}} ) {
 		if ($rec_uri =~ /\/REST\/ARecord\//) {
 			#if found, get RDATA from ARecord URI
-			$api_request = HTTP::Request->new('GET',"https://api2.dynect.net$rec_uri");
-			$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
-			$api_request->content();
-			$api_result = $api_lwp->request($api_request);
-			$api_decode = decode_json( $api_result->content);
-			$api_decode = &api_fail(\$api_key, $api_decode) unless ($api_decode->{'status'} eq 'success');
+			$dynect->request($rec_uri, 'GET') or die $dynect->message;
 			#create array with FQDN and RDATA
-			my @out_arr = ( $api_decode->{'data'}{'fqdn'}, $api_decode->{'data'}{'rdata'}{'address'});
+			my @out_arr = ( $dynect->result->{'data'}{'fqdn'}, $dynect->result->{'data'}{'rdata'}{'address'});
 			#attempt to combine the FQDN and the RDATA into a CSV string and if success print to file
 			if ( $csv_write->combine(@out_arr) ) {
 				print $fhan ($csv_write->string() . "\n");
@@ -263,47 +212,3 @@ else {
 	close $fhan;
 }
 	
-
-#api logout for either logic branch
-$api_request = HTTP::Request->new('DELETE',$session_uri);
-$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $api_key );
-$api_result = $api_lwp->request( $api_request );
-$api_decode = decode_json ( $api_result->content);
-
-#Expects 2 variable, first a reference to the API key and second a reference to the decoded JSON response
-sub api_fail {
-	my ($api_keyref, $api_jsonref) = @_;
-	#set up variable that can be used in either logic branch
-	my $api_request;
-	my $api_result;
-	my $api_decode;
-	my $api_lwp = LWP::UserAgent->new;
-	my $count = 0;
-	#loop until the job id comes back as success or program dies
-	while ( $api_jsonref->{'status'} ne 'success' ) {
-		if ($api_jsonref->{'status'} ne 'incomplete') {
-			foreach my $msgref ( @{$api_jsonref->{'msgs'}} ) {
-				print "API Error:\n";
-				print "\tInfo: $msgref->{'INFO'}\n" if $msgref->{'INFO'};
-				print "\tLevel: $msgref->{'LVL'}\n" if $msgref->{'LVL'};
-				print "\tError Code: $msgref->{'ERR_CD'}\n" if $msgref->{'ERR_CD'};
-				print "\tSource: $msgref->{'SOURCE'}\n" if $msgref->{'SOURCE'};
-			};
-			#api logout or fail
-			$api_request = HTTP::Request->new('DELETE','https://api2.dynect.net/REST/Session');
-			$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $$api_keyref );
-			$api_result = $api_lwp->request( $api_request );
-			$api_decode = decode_json ( $api_result->content);
-			exit;
-		}
-		else {
-			sleep(5);
-			my $job_uri = "https://api2.dynect.net/REST/Job/$api_jsonref->{'job_id'}/";
-			$api_request = HTTP::Request->new('GET',$job_uri);
-			$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $$api_keyref );
-			$api_result = $api_lwp->request( $api_request );
-			$api_jsonref = decode_json( $api_result->content );
-		}
-	}
-	$api_jsonref;
-}
