@@ -211,4 +211,6 @@ else {
 	}
 	close $fhan;
 }
+
+$dynect->logout;
 	

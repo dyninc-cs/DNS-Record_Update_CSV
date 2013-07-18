@@ -6,7 +6,6 @@ use strict;
 use warnings;
 use LWP::UserAgent;
 use JSON;
-use Data::Dumper;
 
 #Constructor
 sub new {	
@@ -62,6 +61,27 @@ sub login {
 	}
 }
 
+sub logout {
+	#get self id
+	my $classid = shift;
+
+	#existance of the API key means we are logged in
+	if ( $classid->{'apikey'} ) {
+		#Logout of the API, to be nice
+		my $api_request = HTTP::Request->new('DELETE','https://api2.dynect.net/REST/Session');
+		$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $classid->{'apikey'} );
+		my $api_result = $classid->{'lwp'}->request( $api_request );
+		my $res =  $classid->check_res( $api_result );
+		if ( $res ) {
+			$classid->{'message'} = "Logout successful\n";
+			return $res;
+		}
+		else {
+			return $res;
+		}
+	}
+}
+
 sub request {
 	my ($classid, $uri, $method) = @_;
 	my $paramref = '';
@@ -73,7 +93,7 @@ sub request {
 			return 0;
 		}
 	}
-
+#TODO: Set this to detect start of string
 	if ( $uri =~ /\/REST\/Session/ ) {
 		$classid->{'message'} = "Please use the ->login or ->logout for managing sessions\n";
 		return 0;
@@ -142,6 +162,7 @@ sub check_res {
 			$api_request->header ( 'Content-Type' => 'application/json', 'Auth-Token' => $classid->{'apikey'} );
 			my $api_result = $classid->{'lwp'}->request( $api_request );
 			my $res = $classid->check_http( $api_result );
+			#TODO: Change this check content rather than is_success
 			unless ( $api_result->is_success ) { 
 				$classid->{'message'} = "Unable to connect to API.\n Status message -\n\t" . $api_result->status_line;
 				return 0;
@@ -166,7 +187,7 @@ sub result {
 sub DESTROY {
 	#get self id
 	my $classid = shift;
-
+#TODO: Set this to call the logout method rather than duplicating code
 	#existance of the API key means we are logged in
 	if ( $classid->{'apikey'} ) {
 		#Logout of the API, to be nice
