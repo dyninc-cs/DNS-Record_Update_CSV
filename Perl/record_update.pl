@@ -34,9 +34,8 @@ use Data::Dumper;
 
 #Import DynECT handler
 use FindBin;
-use lib "$FindBin::Bin/DynectDNS";  # use the parent directory
-use DynECTDNS;
-
+use lib "$FindBin::Bin/DynECT";  # use the parent directory
+require DynECT::DNS_REST;
 
 #Get Options
 my $opt_file;
@@ -107,13 +106,23 @@ if ( ($apicn eq 'CUSOTMER') || ($apiun eq 'USER_NAME') || ($apipw eq 'PASSWORD')
 	exit;
 }
 
+#check usage options for record types
+my ($use_arec, $use_aaaa, $use_cname, $use_txt);
+$use_arec = $use_aaaa = $use_cname = $use_txt = 1;
+$use_arec = 0 if (uc($configopt{'AREC'}) ne 'ON');
+$use_aaaa = 0 if (uc($configopt{'AAAA'}) ne 'ON');
+$use_cname = 0 if (uc($configopt{'CNAME'}) ne 'ON');
+$use_txt = 0 if (uc($configopt{'TXT'}) ne 'ON');
 
-my $dynect = DynECTDNS->new();
+
+
+#create a DynECT API object and login
+my $dynect = DynECT::DNS_REST->new();
 $dynect->login( $apicn, $apiun, $apipw)
-	or die $dynect->message;
+	or die $dynect->message . ":$!";
 
-if ( !$opt_gen ) {
-	#Create CSV reader
+if ( !$opt_gen ) { 
+	#Create CSV reader 
 	my $csv_read = Text::CSV_XS->new  ( { binary => 1 } )
 		or die "Cannot use CSV: ".Text::CSV_XS->error_diag ();
 	open (my $fhan, '<', $opt_file) 
@@ -123,68 +132,154 @@ if ( !$opt_gen ) {
 	my %nodes;
 	#Read in all changes
 	while ( my $csvrow = $csv_read->getline( $fhan )) {
-		next unless $csvrow->[2];
-		push ( @{ $nodes{ $csvrow->[0] }} , [ $csvrow->[1], $csvrow->[2]]);
+		next unless $csvrow->[4];
+		push ( @{ $nodes{ shift @$csvrow }} , [@$csvrow]);
 	}
 	close $fhan;
 
-	#Call REST/AllRecord on the zone
-	$dynect->request( "/REST/AllRecord/$opt_zone", 'GET')
-		or die $dynect->message;
+	$dynect->request("/REST/AllRecord/$opt_zone/",'GET')
+		or die $dynect->message . ":$!";
+	#precompile a regex to capture the FQDN from the record URI
+	my $regex = qr/\/REST\/([^\/]+)\/$opt_zone\/([^\/]+)\//;
 
-	my $keep_result = $dynect->result;
-
-
-	foreach my $uri ( @{ $keep_result->{'data'} }) {
-		#Skip any non-a records
-		next unless $uri =~ /\/REST\/ARecord\//;
-		#Process all possible matching changes
-		foreach my $node ( keys %nodes ) {
-			#Check to see if zone node matches
-			my $regex = '\/REST\/ARecord\/' . $opt_zone . '\/([^/]+)/';
-			$uri =~ /$regex/;
-			next unless ( $1 eq $node);
-
-			#Check rdata behind that URI
-			$dynect->request( $uri, 'GET') or die $dynect->message;
-			my $rdata = $dynect->result; 
-
-			#Check all updates at that node for matches			
-			foreach my $set ( @{ $nodes{ $node } } ) {
-				next unless $rdata->{'data'}{'rdata'}{'address'} eq $set->[0];
-				if ( uc($set->[1]) eq 'DEL') {
-					print "Delete - $node - $set->[0]\n";
-					$dynect->request( $uri, 'DELETE');  
+	foreach my $uri ( @{$dynect->result->{'data'}}) {
+		#run capture
+		$uri =~ $regex;
+		my $rtype = $1;
+		my $node = $2;
+		if ( exists $nodes{$node} ) {
+			next if ( $rtype eq 'ARecord' && !$use_arec);
+			next if ( $rtype eq 'AAAARecord' && !$use_aaaa);
+			next if ( $rtype eq 'TXTRecord' && !$use_txt);
+			next if ( $rtype eq 'CNAMERecord' && !$use_cname);
+			$dynect->request($uri, 'GET') 
+				or die $dynect->message . ":$!";
+			#get the rdata regardless of type by dynamically generating the keys for the rdata hash
+			my $rclass = (keys $dynect->result->{'data'}->{'rdata'})[0];
+			my $rdata = $dynect->result->{'data'}->{'rdata'}->{$rclass};
+			
+			#This foreach loop is broken by last call  in record -> cname handling
+			foreach my $update ( @{$nodes{$node}} ) {
+				#skip unless this is the record we want to update
+				next unless $rdata eq $update->[1];
+				#Check for same record types
+				if ($update->[0] eq $update->[3]) {
+					print "Updating $rtype at $node\n";
+					my %api_param = (
+						rdata => {
+							$rclass => $update->[4]
+						}
+					);
+					#set new TTL if new TTL is defined
+					$api_param{'ttl'} = $update->[5] if $update->[5];
+					$dynect->request($uri,'PUT',\%api_param) or die $dynect->message . ":$!";
+				}
+				elsif ( (uc($update->[3]) eq 'A') || (uc($update->[3]) eq 'AAAA') || (uc($update->[3]) eq 'CNAME') || (uc($update->[3]) eq 'TXT') ) {
+					my $newrclass;
+					$newrclass = 'address' if (uc($update->[3]) eq 'A'); 
+					$newrclass = 'address' if (uc($update->[3]) eq 'AAAA'); 
+					$newrclass = 'txtdata' if (uc($update->[3]) eq 'TXT'); 
+					$newrclass = 'cname' if (uc($update->[3]) eq 'CNAME'); 
+					my $newrtype = uc($update->[3]) . 'Record';
+					if ( uc($update->[3]) ne 'CNAME') {
+						print "Replacing $rtype with $newrtype at $node\n";
+						#safe to delete current record and put in new one
+						$dynect->request($uri,'DELETE') or die $dynect->message . ":$!";
+						my %api_param = (
+							rdata => {
+								$newrclass => $update->[4]
+							}
+						);
+						#set new TTL if new TTL is defined
+						$api_param{'ttl'} = $update->[5] if $update->[5];
+						$dynect->request("/REST/$newrtype/$opt_zone/$node/",'POST',\%api_param) or die $dynect->message . ":$!";
+					}
+					else {
+						print "Pruning records and replacing with $newrtype at $node\n";
+						#need to prune all records at node to add CNAME
+						$dynect->request("/REST/AllRecord/$opt_zone/$node/",'GET') or die $dynect->message . ":$!";
+						foreach my $deluri ( @{$dynect->result->{'data'}} ) {
+							$dynect->request($deluri,'DELETE') or die $dynect->message . ":$!";
+						}
+						my %api_param = (
+							rdata => {
+								$newrclass => $update->[4]
+							}
+						);
+						#set new TTL if new TTL is defined
+						$api_param{'ttl'} = $update->[5] if $update->[5];
+						$dynect->request("/REST/$newrtype/$opt_zone/$node/",'POST',\%api_param) or die $dynect->message . ":$!";
+						#Prevent any additional updates agains that node
+						delete $nodes{$node};
+						last;
+					}
+				}
+				#everything else SHOULD  be a DELETE
+				elsif ( uc($update->[3]) eq 'DEL' ) {
+					print "Deleting $rtype at $node\n";
+					$dynect->request($uri,'DELETE') or die $dynect->message . ":$!";
 				}
 				else {
-					#If so, update node
-					print "Update - $node - $set->[0] => $set->[1]\n";
-					my %api_param = ( rdata => { 'address' => $set->[1] });
-					$dynect->request( $uri, 'put', \%api_param) or die $dynect->message; 
+					print "Invalid command: $node, ";
+					foreach ( @$update ) {
+						print "$_, " if $_;
+					}
+					print "\n";
 				}
+					
 			}
 		}
 	}
-	
-	#Check for any added records
+	#do all record adds
 	foreach my $node ( keys %nodes ) {
-		foreach my $set ( @{ $nodes{ $node } } ) {
-			next unless ( uc($set->[0]) eq 'ADD');
-			#Add record
-			print "Add   - $node - $set->[1]\n";
-			my %api_param = ( rdata => { 'address' => $set->[1] });
-			$dynect->request( "/REST/ARecord/$opt_zone/$node/", 'POST', \%api_param) or die $dynect->message;
+	   foreach my $update ( @{ $nodes{ $node } } ){
+			next unless ( uc($update->[0]) eq 'ADD' );
+			my $newrclass;
+			$newrclass = 'address' if (uc($update->[3]) eq 'A'); 
+			$newrclass = 'address' if (uc($update->[3]) eq 'AAAA'); 
+			$newrclass = 'txtdata' if (uc($update->[3]) eq 'TXT'); 
+			$newrclass = 'cname' if (uc($update->[3]) eq 'CNAME'); 
+			my $newrtype = uc($update->[3]) . 'Record';
+			print "Adding $newrtype at $node\n";
+			my %api_param = (
+				rdata => {
+					$newrclass => $update->[4]
+				}
+			);
+			#set new TTL if new TTL is defined
+			$api_param{'ttl'} = $update->[5] if $update->[5];
+			$dynect->request("/REST/$newrtype/$opt_zone/$node/",'POST',\%api_param) or die $dynect->message . ":$!";
+		}
+	}
+	#this code block could display pending changes, but no was to determine deletes from creates
+	if ( 1 == 0) {
+		$dynect->request("/REST/ZoneChanges/$opt_zone/",'GET');
+		my %changes;
+		foreach my $change ( @{$dynect->result->{'data'}} ) {
+			my $rtype = $change->{'rdata_type'};
+			my $rdkey = 'rdata_' . lc($rtype);
+			$changes{ $change->{'fqdn'} } .= "\n\tRType: $change->{'rdata_type'}\n\tRData: ";
+			foreach my $rdata (keys $change->{'rdata'}->{$rdkey }) {
+				$changes{ $change->{'fqdn'} } .= $change->{'rdata'}->{$rdkey}->{$rdata};
+			}
+		}
+		print "Pending Changset:\n";
+		foreach my $node ( sort keys %changes ) {
+			print "\nNode: $node $changes{$node}\n";
 		}
 	}
 
-	#Done making changes, publish zone
-	my %api_param = ( publish => 'True' );
-	$dynect->request( "/REST/Zone/$opt_zone", 'PUT', \%api_param) or die $dynect->message;
+	print "publishing zone $opt_zone in 10 seconds ...\n";
+	sleep(10);
+	print "Publishing zone $opt_zone\n";
+	my %publish_param = ( 'publish' => 'true' );
+	$dynect->request( "/REST/Zone/$opt_zone/",'PUT',\%publish_param) or die $dynect->message . ":$!";
+
 }
 
 else {
 	#Generating file for CSV
-	print "Generating CSV file $opt_file for zone $opt_zone\n";
+	print "Generating CSV file $opt_file for zone $opt_zone.\nPlease wait, this may take a few moments\n";
 
 	#Get all records on zone
 	$dynect->request( "/REST/AllRecord/$opt_zone", 'GET');
@@ -196,13 +291,56 @@ else {
 	open (my $fhan,'>', $opt_file)
 		or die "Unable to oepn $opt_file for writing\n";
 
-	#iterate over all recrod URI looking for type ARecord	
+
+	#iterate over all recrod URI looking for each record type	
 	foreach my $rec_uri ( @{$allrec->{'data'}} ) {
 		if ($rec_uri =~ /\/REST\/ARecord\//) {
-			#if found, get RDATA from ARecord URI
-			$dynect->request($rec_uri, 'GET') or die $dynect->message;
-			#create array with FQDN and RDATA
-			my @out_arr = ( $dynect->result->{'data'}{'fqdn'}, $dynect->result->{'data'}{'rdata'}{'address'});
+			#move on if rtype is turned off
+			next unless $use_arec;
+			#if found, get RDATA from URI
+			$dynect->request($rec_uri, 'GET') or die $dynect->message . ":$!";
+			#create array with FQDN , RTYPE, RDATA, TTL
+			my @out_arr = ( $dynect->result->{'data'}{'fqdn'},$dynect->result->{'data'}{'record_type'}, 
+				$dynect->result->{'data'}{'rdata'}{'address'},$dynect->result->{'data'}{'ttl'});
+			#attempt to combine the FQDN and the RDATA into a CSV string and if success print to file
+			if ( $csv_write->combine(@out_arr) ) {
+				print $fhan ($csv_write->string() . "\n");
+			}
+		}
+		elsif ($rec_uri =~ /\/REST\/AAAARecord\//) {
+			#move on if rtype is turned off
+			next unless $use_aaaa;
+			#if found, get RDATA from URI
+			$dynect->request($rec_uri, 'GET') or die $dynect->message . ":$!";
+			#create array with FQDN , RTYPE, RDATA, TTL
+			my @out_arr = ( $dynect->result->{'data'}{'fqdn'},$dynect->result->{'data'}{'record_type'}, 
+				$dynect->result->{'data'}{'rdata'}{'address'},$dynect->result->{'data'}{'ttl'});
+			#attempt to combine the FQDN and the RDATA into a CSV string and if success print to file
+			if ( $csv_write->combine(@out_arr) ) {
+				print $fhan ($csv_write->string() . "\n");
+			}
+		}
+		elsif ($rec_uri =~ /\/REST\/TXTRecord\//) {
+			#move on if rtype is turned off
+			next unless $use_txt;
+			#if found, get RDATA from URI
+			$dynect->request($rec_uri, 'GET') or die $dynect->message . ":$!";
+			#create array with FQDN , RTYPE, RDATA, TTL
+			my @out_arr = ( $dynect->result->{'data'}{'fqdn'},$dynect->result->{'data'}{'record_type'}, 
+				$dynect->result->{'data'}{'rdata'}{'txtdata'},$dynect->result->{'data'}{'ttl'});
+			#attempt to combine the FQDN and the RDATA into a CSV string and if success print to file
+			if ( $csv_write->combine(@out_arr) ) {
+				print $fhan ($csv_write->string() . "\n");
+			}
+		}
+		elsif ($rec_uri =~ /\/REST\/CNAMERecord\//) {
+			#move on if rtype is turned off
+			next unless $use_cname;
+			#if found, get RDATA from URI
+			$dynect->request($rec_uri, 'GET') or die $dynect->message . ":$!";
+			#create array with FQDN , RTYPE, RDATA, TTL
+			my @out_arr = ( $dynect->result->{'data'}{'fqdn'},$dynect->result->{'data'}{'record_type'}, 
+				$dynect->result->{'data'}{'rdata'}{'cname'},$dynect->result->{'data'}{'ttl'});
 			#attempt to combine the FQDN and the RDATA into a CSV string and if success print to file
 			if ( $csv_write->combine(@out_arr) ) {
 				print $fhan ($csv_write->string() . "\n");
@@ -212,5 +350,6 @@ else {
 	close $fhan;
 }
 
+#logout of the API
 $dynect->logout;
 	
