@@ -31,10 +31,7 @@ use warnings;
 use strict;
 use Config::Simple;
 use Getopt::Long;
-use LWP::UserAgent;
-use JSON;
 use Text::CSV_XS;
-use Data::Dumper;
 
 #Import DynECT handler
 use FindBin;
@@ -162,10 +159,8 @@ if ( !$opt_gen ) {
 		push ( @{ $nodes{ shift @$csvrow }} , [@$csvrow]);
 	}
 	close $fhan;
-
-	print Dumper \%nodes;
-	exit;
-
+	
+	#storage by node name for updates
 	my %summary;
 
 	$dynect->request("/REST/AllRecord/$opt_zone/",'GET')
