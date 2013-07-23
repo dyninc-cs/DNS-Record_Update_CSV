@@ -8,10 +8,14 @@
 #-If column 1 is 'ADD' the script will add the record at that node
 #-If column 2 is 'DEL' the script will delete that a record
 #OPTIONS:
-#-h/--help	Displays this help message
-#-f/--file	File to be read for updated record information
-#-z/--zone	Name of zone to be updated EG. example.com
-#-g/--gen	Set this option to generate a CSV file
+#-h/--help		Displays this help message
+#-f/--file		File to be read for updated record information
+#-z/--zone		Name of zone to be updated EG. example.com
+#-g/--gen		Set this option to generate a CSV file
+#-d/--dryrun 	Set this run to interpret the CSV file and exit
+#				withouth publishing changes
+#-c/--confirm	Require confrimation before publishing changes
+#--noconfirm	Automatically publish changes without confrimaiton
 #With this option set -f will be used as the file to be written
 #With this option set -z will be used as the zone to be read
 #
@@ -42,6 +46,8 @@ my $opt_file;
 my $opt_gen;
 my $opt_zone;
 my $opt_help;
+my $opt_confirm=2;
+my $opt_dryrun;
 
 #Read in options (long or short) from invocation
 GetOptions( 
@@ -49,18 +55,24 @@ GetOptions(
 	'zone=s' 	=> 	\$opt_zone,
 	'generate'	=> 	\$opt_gen,
 	'help'		=>	\$opt_help,
+	'confirm!'	=>	\$opt_confirm,
+	'dryrun'	=>	\$opt_dryrun,
 );
+
 
 #help
 if ( $opt_help) {
 	print "This script works off the DynECT API to generate and process CSV files\nto update A records within an account\n";
 	print "\nOPTIONS:\n";
-	print "-h/--help\tDisplays this help message\n";
-	print "-f/--file\tFile to be read for updated record information\n";
-	print "-z/--zone\tName of zone to be updated EG. example.com\n";
-	print "-g/--gen\tSet this option to generate a CSV file\n";
-	print "\t\tWith this option set -f will be used as the file to be written\n";
-	print "\t\tWith this option set -z will be used as the zone to be read\n";
+	print "-h/--help\t\tDisplays this help message\n";
+	print "-f/--file\t\tFile to be read for updated record information\n";
+	print "-g/--gen\t\tSet this option to generate a CSV file\n";
+	print "-d/--dryrun\t\tSet this run to interpret the CSV file and exit\n\t\t\twithouth publishing changes\n";
+	print "-c/--confirm\t\tRequire confrimation before publishing changes\n";
+	print "--noconfirm\t\tAutomatically publish changes without confrimaiton\n";
+	print "-z/--zone\t\tName of zone to be updated EG. example.com\n";
+	print "\t\t\tWith this option set -f will be used as the file to be written\n";
+	print "\t\t\tWith this option set -z will be used as the zone to be read\n";
 	print "\nEXAMPLE USGAGE:\n";
 	print "perl record_update.pl -f ips.csv -z example.com\n";
 	print "-Read udpates from ips.csv and apply them to example.com\n\n";
@@ -115,6 +127,15 @@ $use_cname = 0 if (uc($configopt{'CNAME'}) ne 'ON');
 $use_txt = 0 if (uc($configopt{'TXT'}) ne 'ON');
 
 
+#confmode: 0= No confirm 1= Confirm
+my $confmode = 0;
+if ( $opt_confirm == 2 ) { #default from command line
+	$confmode = 1 if (uc($configopt{'CONFIRM_MODE'}) ne 'OFF')
+}
+else {
+	$confmode = $opt_confirm;
+}
+
 
 #create a DynECT API object and login
 my $dynect = DynECT::DNS_REST->new();
@@ -133,9 +154,19 @@ if ( !$opt_gen ) {
 	#Read in all changes
 	while ( my $csvrow = $csv_read->getline( $fhan )) {
 		next unless $csvrow->[4];
+		foreach ( @$csvrow ) {
+			#Eliminate all leading and trailing whitepace
+			$_ =~ s/^\s+//;
+			$_ =~ s/\s+$//;
+		}
 		push ( @{ $nodes{ shift @$csvrow }} , [@$csvrow]);
 	}
 	close $fhan;
+
+	print Dumper \%nodes;
+	exit;
+
+	my %summary;
 
 	$dynect->request("/REST/AllRecord/$opt_zone/",'GET')
 		or die $dynect->message . ":$!";
@@ -164,7 +195,7 @@ if ( !$opt_gen ) {
 				next unless $rdata eq $update->[1];
 				#Check for same record types
 				if ($update->[0] eq $update->[3]) {
-					print "Updating $rtype at $node\n";
+					$summary{$node} .= "UPDATE\t$update->[3]\t$rdata -> $update->[4]\n";
 					my %api_param = (
 						rdata => {
 							$rclass => $update->[4]
@@ -182,7 +213,8 @@ if ( !$opt_gen ) {
 					$newrclass = 'cname' if (uc($update->[3]) eq 'CNAME'); 
 					my $newrtype = uc($update->[3]) . 'Record';
 					if ( uc($update->[3]) ne 'CNAME') {
-						print "Replacing $rtype with $newrtype at $node\n";
+						$summary{$node} .= "DELETE\t$update->[0]\t$rdata\n";
+						$summary{$node} .= "ADD\t$update->[3]\t$update->[4]\n";
 						#safe to delete current record and put in new one
 						$dynect->request($uri,'DELETE') or die $dynect->message . ":$!";
 						my %api_param = (
@@ -195,7 +227,8 @@ if ( !$opt_gen ) {
 						$dynect->request("/REST/$newrtype/$opt_zone/$node/",'POST',\%api_param) or die $dynect->message . ":$!";
 					}
 					else {
-						print "Pruning records and replacing with $newrtype at $node\n";
+						$summary{$node} .= "PRUNE\tNODE\t$node\n";
+						$summary{$node} .= "ADD\tCNAME\t$update->[4]\n";
 						#need to prune all records at node to add CNAME
 						$dynect->request("/REST/AllRecord/$opt_zone/$node/",'GET') or die $dynect->message . ":$!";
 						foreach my $deluri ( @{$dynect->result->{'data'}} ) {
@@ -216,7 +249,7 @@ if ( !$opt_gen ) {
 				}
 				#everything else SHOULD  be a DELETE
 				elsif ( uc($update->[3]) eq 'DEL' ) {
-					print "Deleting $rtype at $node\n";
+					$summary{$node} .= "DELETE\t$update->[0]\t$rdata\n";
 					$dynect->request($uri,'DELETE') or die $dynect->message . ":$!";
 				}
 				else {
@@ -240,7 +273,7 @@ if ( !$opt_gen ) {
 			$newrclass = 'txtdata' if (uc($update->[3]) eq 'TXT'); 
 			$newrclass = 'cname' if (uc($update->[3]) eq 'CNAME'); 
 			my $newrtype = uc($update->[3]) . 'Record';
-			print "Adding $newrtype at $node\n";
+			$summary{$node} .= "ADD\t$update->[3]\t$update->[4]\n";
 			my %api_param = (
 				rdata => {
 					$newrclass => $update->[4]
@@ -266,6 +299,32 @@ if ( !$opt_gen ) {
 		print "Pending Changset:\n";
 		foreach my $node ( sort keys %changes ) {
 			print "\nNode: $node $changes{$node}\n";
+		}
+	}
+
+	#print pending changes;
+	my $printsum;
+	foreach my $node ( keys %summary ) {
+		$printsum .= "Node: $node\n" . $summary{$node} . "\n";
+	}
+	print "Pending Changes:\n\n$printsum";
+	
+	#check if the user wants to make changes
+	exit if $opt_dryrun;
+	if ( $confmode) {
+		print "Please confirm changes by typing 'CONFIRM'\n:";
+
+		while (<STDIN>) {
+			my $input = $_;
+			chomp $input;
+			exit if (uc($input) eq 'EXIT');
+			last if ( $input eq 'CONFIRM');
+			if ( uc($input) eq 'CHANGES' ) {
+				print "Pending Changes:\n\n$printsum";
+				next;
+			}
+			print "Invalid input: $input.  Options:\n\tCONFIRM\tConfirm changes and continue\n\tEXIT  \tCancel and exit program\n";
+			print "\tCHANGES\tPrint pending changes\n:";
 		}
 	}
 
