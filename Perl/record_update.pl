@@ -1,12 +1,12 @@
 #!/usr/bin/env perl
 
 #This script works off the DynECT API to do one of two primary actions:
-#1. Generate a two column CSV file where column 1 is a series of nodes withing a
-#zone and column 2 is the A Record located at that node
-#2. Update a zone by reading a 3 column zone extended from 1. whereas column 3 is
-#the new A record to replace the record listed to the left
-#-If column 1 is 'ADD' the script will add the record at that node
-#-If column 2 is 'DEL' the script will delete that a record
+#1. Generate a CSV file with the followiing format:
+#fqdn, rtype, rdata, ttl
+#2. Update a zone by reading the csv whereas column 5-7 are in this format
+#newrtype, newrdata, ttl
+#-If column 2 is 'ADD' the script will add the record at that node
+#-If column 5 is 'DEL' the script will delete that a record
 #OPTIONS:
 #-h/--help		Displays this help message
 #-f/--file		File to be read for updated record information
